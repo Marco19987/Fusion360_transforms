@@ -1,0 +1,254 @@
+import adsk.core
+import adsk.fusion
+import traceback
+from scipy.spatial.transform import Rotation
+import numpy as np
+
+def get_sub_matrix(matrix, rows,cols):
+    if not isinstance(matrix, adsk.core.Matrix3D):
+        raise ValueError("La matrice deve essere di tipo Matrix3D di Fusion 360")
+
+    sub_matrix = adsk.core.Matrix3D.create()
+
+    for row in range(rows):
+        for col in range(cols):
+            element = matrix.getCell(row, col)
+            sub_matrix.setCell(row, col, element)
+
+    return sub_matrix
+def round_matrix_elements(transformation_matrix, decimal_places=2):
+    if not isinstance(transformation_matrix, adsk.core.Matrix3D):
+        raise ValueError("La matrice deve essere di tipo Matrix3D di Fusion 360")
+
+    rounded_matrix = adsk.core.Matrix3D.create()
+
+    for row in range(4):
+        for col in range(4):
+            element = transformation_matrix.getCell(row, col)
+            rounded_element = round(element, decimal_places)
+            rounded_matrix.setCell(row, col , rounded_element)
+
+    return rounded_matrix
+def transpose_matrix(matrix):
+    # Verifica se la matrice passata è di tipo Matrix3D di Fusion 360
+    if not isinstance(matrix, adsk.core.Matrix3D):
+        raise ValueError("La matrice deve essere di tipo Matrix3D di Fusion 360")
+
+    # Crea una nuova matrice vuota
+    transposed_matrix = adsk.core.Matrix3D.create()
+
+    # Esegui la trasposta copiando gli elementi dalla matrice originale
+    for row in range(4):
+        for col in range(4):
+            transposed_matrix.setCell(col, row, matrix.getCell(row, col))
+
+    return transposed_matrix
+
+def matrix_to_string(matrix):
+    result = ''
+    for row in range(4):
+        for col in range(4):
+            result += str(matrix.getCell(row, col))
+            if col < 3:
+                result += ', '
+        if row < 3:
+            result += '\n'
+    return result
+
+def matrix_to_euler(matrix):
+    if not isinstance(matrix, adsk.core.Matrix3D):
+        raise ValueError("La matrice deve essere di tipo Matrix3D di Fusion 360")
+    
+    R = get_sub_matrix(matrix,3,3)
+    matrix_float = [[R.getCell(row, col) for col in range(3)] for row in range(3)]
+    rotation = Rotation.from_matrix(matrix_float)
+    # Ottieni gli angoli di Eulero (roll, pitch, yaw) in radianti
+    euler_angles_rad = rotation.as_euler('xyz', degrees=False)
+    yaw = euler_angles_rad[2]
+    pitch = euler_angles_rad[1]
+    roll = euler_angles_rad[0]
+        
+    return roll, pitch, yaw
+
+def write_to_file(file_path, data):
+    try:
+        with open(file_path, 'w') as file:
+            file.write(data)
+    except Exception as e:
+        return str(e)
+    return None
+
+def vector_to_string(vector):
+    return f'({vector.x}, {vector.y}, {vector.z})'
+
+def divide_vector(vector, divisor):
+    return adsk.core.Vector3D.create(round(vector.x,2) / divisor, round(vector.y,2) / divisor, round(vector.z,2) / divisor)
+
+def get_transform(occurrence):
+    # Ottieni la trasformazione (posa) dell'occorrenza
+    transform = round_matrix_elements(occurrence.transform2)
+    #transform = occurrence.transform2
+    return transform
+
+def normalize(vector):
+    vector_ = vector.copy()
+    vector_.normalize()
+    vector__ = adsk.core.Vector3D.create(round(vector_.x, 2), round(vector_.y, 2), round(vector_.z, 2))
+    return vector__
+
+def transform_info(transform_):
+    transform = transform_['transform']
+    (origin, xAxis, yAxis, zAxis) = transform.getAsCoordinateSystem()
+    origin = divide_vector(origin,100) 
+    (roll,pitch,yaw) = matrix_to_euler(transform)
+    transform_info = {
+    'name':  transform_['name'],
+    'origin': origin,
+    'xaxis': normalize(xAxis),
+    'yaxis': normalize(yAxis),
+    'zaxis': normalize(zAxis),
+    'roll': roll,
+    'pitch': pitch,
+    'yaw': yaw,
+    'T': transform
+    }
+    return transform_info
+
+def write_transforms(file_path, transforms):
+    try:
+      with open(file_path, 'w') as file:
+        for transform in transforms:
+            transform_i = transform_info(transform)
+            with open(file_path, 'a') as file:
+                file.write("Transform of {}\n".format(transform_i['name']))
+                file.write("Origin: {}\n".format(vector_to_string(transform_i['origin'])))
+                file.write("X-Axis: {}\n".format(vector_to_string(transform_i['xaxis'])))
+                file.write("Y-Axis: {}\n".format(vector_to_string(transform_i['yaxis'])))
+                file.write("Z-Axis: {}\n".format(vector_to_string(transform_i['zaxis'])))
+                file.write("Roll,Pitch,Yaw: ({},{},{})\n".format(transform_i['roll'],transform_i['pitch'],transform_i['yaw']))
+                file.write("Transform: \n{}\n\n".format(matrix_to_string(transform_i['T'])))
+                file.write("----------------------------\n")
+        error = False
+
+    except Exception as e:
+        error = True
+    return error
+
+def get_relative_transform(parent,child):
+    parent_transform_base = get_transform(parent)
+    child_transform_base = get_transform(child)
+    base_transform_parent = parent_transform_base.copy()
+    base_transform_parent.invert()
+    base_transform_parent_ = np.array(base_transform_parent.asArray()).reshape(4,4)
+    child_transform_base_ = np.array(child_transform_base.asArray()).reshape(4,4)
+    child_transform_parent_ =  np.dot(base_transform_parent_,child_transform_base_)
+
+    child_transform_parent = adsk.core.Matrix3D.create()
+    for row in range(4):
+        for col in range(4):
+             child_transform_parent.setCell(row, col, child_transform_parent_[row,col])
+    
+    return child_transform_parent
+
+def run(context):
+    ui = None
+    try:
+        app = adsk.core.Application.get()
+        ui = app.userInterface
+
+        design = app.activeProduct
+
+        if not design:
+            ui.messageBox('Nessun documento attivo.')
+            return
+
+        # ottieni lista componenti progetto, occorrenze e giunti
+        root = design.rootComponent
+        components = design.allComponents
+        ui.messageBox("start",'Message')
+        transforms = []
+        """for component in components:
+            ui.messageBox(component.name,'component')
+            joints = component.allJoints
+            for joint in joints: 
+               child  = joint.occurrenceOne # child - component1 in the joint definition
+               parent = joint.occurrenceTwo  # parent - component2 in the joint definition
+               #ui.messageBox(child.name,'child')
+               #ui.messageBox(parent.name,'parent')
+               #if child is None: break
+               #if parent is None: break
+               transform = get_relative_transform(parent,child)
+               rel_name = parent.name + "_T_" + child.name
+               transform_ = {
+                   'name': rel_name,
+                   'transform': transform
+               }
+               transforms.append(transform_)"""
+
+        # Ottieni la raccolta di tutti gli oggetti di occorrenza nel documento
+        rigid_groups = root.rigidGroups
+
+        for rigid_group in rigid_groups:            
+            ui.messageBox('Gruppo Rigido: {}'.format(rigid_group.name))
+
+            # Itera sulle occorrenze dei componenti nel gruppo rigido
+            '''for occurrence in rigid_group.occurrences:
+                component = occurrence.component
+                ui.messageBox(' - Occorrenza del componente: {}'.format(component.name))
+            '''
+
+            num_occurrences = rigid_group.occurrences.count
+            for i in range(num_occurrences-1):
+                parent =  rigid_group.occurrences.item(i)
+                ui.messageBox(' - parent: {}'.format(parent.component.name))
+                
+                child =  rigid_group.occurrences.item(i+1)
+                ui.messageBox(' - child: {}'.format(child.component.name))
+
+                transform = get_relative_transform(parent,child)
+                rel_name = parent.name + "_T_" + child.name
+                transform_ = {
+                    'name': rel_name,
+                    'transform': transform
+                }
+                transforms.append(transform_)
+
+
+
+            '''
+            occurrence1 =  rigid_group.occurrences.item(0)
+            ui.messageBox(' - Occurrence1: {}'.format(occurrence1.component.name))
+            parent = occurrence1
+            
+            occurrence2 =  rigid_group.occurrences.item(1)
+            ui.messageBox(' - Occurrence2: {}'.format(occurrence2.component.name))
+            child = occurrence2
+
+            transform = get_relative_transform(parent,child)
+            rel_name = parent.name + "_T_" + child.name
+            transform_ = {
+                   'name': rel_name,
+                   'transform': transform
+            }
+            transforms.append(transform_)
+            '''
+
+
+               
+        
+        # Specifica il percorso del file in cui scrivere i dati
+        file_path = 'C:\\Users\\Marco\\Desktop\\Transform_Fusion360\\pose_data.txt' 
+        error = write_transforms(file_path,transforms)
+
+        if not(error): 
+            ui.messageBox(f"Le informazioni sulla trasformazione sono state salvate in {file_path}")
+        else:
+            ui.messageBox(f"Errore salvataggio file, verifica il percorso: {file_path}")
+        
+    except:
+        if ui:
+            ui.messageBox('An error occurred:\n{}'.format(traceback.format_exc()))
+
+if __name__ == '__main__':
+    run(None)
+
